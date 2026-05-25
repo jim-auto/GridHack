@@ -14,6 +14,18 @@
 
   const keys = new Set();
   const pressed = new Set();
+  const touch = {
+    available: window.matchMedia("(pointer: coarse)").matches,
+    joystickId: null,
+    joystickBase: { x: 0, y: 0 },
+    joystickKnob: { x: 0, y: 0 },
+    vector: { x: 0, y: 0 },
+    pointerActions: new Map(),
+    deploy: false,
+    wall: false,
+    reset: false
+  };
+  let touchControls = {};
   const colors = {
     bg: "#03040a",
     panel: "rgba(8, 13, 25, 0.78)",
@@ -42,11 +54,13 @@
     ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
 
     const hudReserve = view.w < 760 ? 132 : 118;
+    const touchReserve = touchControlsVisible() ? 112 : 0;
     const usableW = Math.max(320, view.w - 32);
-    const usableH = Math.max(300, view.h - hudReserve - 16);
+    const usableH = Math.max(300, view.h - hudReserve - touchReserve - 16);
     view.tile = Math.max(24, Math.floor(Math.min(usableW / 19, usableH / 11)));
     view.ox = Math.floor((view.w - view.tile * 19) * 0.5);
     view.oy = Math.floor((view.w < 760 ? 126 : 98) + Math.max(0, (view.h - 720) * 0.18));
+    updateTouchLayout();
   }
 
   window.addEventListener("resize", resize);
@@ -65,6 +79,161 @@
   window.addEventListener("keyup", (event) => {
     keys.delete(event.code);
   });
+
+  canvas.addEventListener("pointerdown", handlePointerDown);
+  canvas.addEventListener("pointermove", handlePointerMove);
+  canvas.addEventListener("pointerup", handlePointerEnd);
+  canvas.addEventListener("pointercancel", handlePointerEnd);
+  canvas.addEventListener("lostpointercapture", handlePointerEnd);
+
+  function touchControlsVisible() {
+    return touch.available || view.w < 920;
+  }
+
+  function updateTouchLayout() {
+    const compact = view.w < 760;
+    const bottom = Math.max(18, view.h - (compact ? 72 : 84));
+    const joystickRadius = compact ? 46 : 56;
+    const buttonRadius = compact ? 33 : 40;
+    touchControls = {
+      joystick: {
+        x: compact ? 70 : 92,
+        y: bottom,
+        r: joystickRadius,
+        knobR: compact ? 18 : 22
+      },
+      deploy: {
+        x: view.w - (compact ? 68 : 96),
+        y: bottom - (compact ? 22 : 28),
+        r: buttonRadius,
+        label: "NODE",
+        color: colors.cyan
+      },
+      wall: {
+        x: view.w - (compact ? 136 : 184),
+        y: bottom + (compact ? 18 : 22),
+        r: compact ? 29 : 35,
+        label: "WALL",
+        color: colors.magenta
+      },
+      reset: {
+        x: view.w - (compact ? 66 : 92),
+        y: compact ? 112 : 112,
+        w: compact ? 86 : 98,
+        h: 34
+      }
+    };
+
+    if (touch.joystickId == null) {
+      touch.joystickBase = { x: touchControls.joystick.x, y: touchControls.joystick.y };
+      touch.joystickKnob = { ...touch.joystickBase };
+    }
+  }
+
+  function pointerPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  }
+
+  function pointInCircle(point, circle) {
+    return Math.hypot(point.x - circle.x, point.y - circle.y) <= circle.r;
+  }
+
+  function pointInRect(point, rect) {
+    return point.x >= rect.x - rect.w * 0.5 &&
+      point.x <= rect.x + rect.w * 0.5 &&
+      point.y >= rect.y - rect.h * 0.5 &&
+      point.y <= rect.y + rect.h * 0.5;
+  }
+
+  function beginJoystick(pointerId, point) {
+    touch.joystickId = pointerId;
+    touch.joystickBase = { ...point };
+    touch.joystickKnob = { ...point };
+    touch.vector = { x: 0, y: 0 };
+  }
+
+  function updateJoystick(point) {
+    const maxDistance = touchControls.joystick.r;
+    const dx = point.x - touch.joystickBase.x;
+    const dy = point.y - touch.joystickBase.y;
+    const distance = Math.hypot(dx, dy);
+    const scale = distance > maxDistance ? maxDistance / distance : 1;
+    touch.joystickKnob = {
+      x: touch.joystickBase.x + dx * scale,
+      y: touch.joystickBase.y + dy * scale
+    };
+    touch.vector = {
+      x: clamp(dx / maxDistance, -1, 1),
+      y: clamp(dy / maxDistance, -1, 1)
+    };
+    const len = Math.hypot(touch.vector.x, touch.vector.y);
+    if (len > 1) {
+      touch.vector.x /= len;
+      touch.vector.y /= len;
+    }
+  }
+
+  function setTouchAction(name, active) {
+    touch[name] = active;
+  }
+
+  function handlePointerDown(event) {
+    if (!touchControlsVisible()) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const point = pointerPoint(event);
+    let handled = false;
+
+    if (pointInCircle(point, touchControls.deploy)) {
+      touch.pointerActions.set(event.pointerId, "deploy");
+      setTouchAction("deploy", true);
+      handled = true;
+    } else if (pointInCircle(point, touchControls.wall)) {
+      touch.pointerActions.set(event.pointerId, "wall");
+      setTouchAction("wall", true);
+      handled = true;
+    } else if (pointInRect(point, touchControls.reset)) {
+      touch.pointerActions.set(event.pointerId, "reset");
+      setTouchAction("reset", true);
+      pressed.add("KeyR");
+      handled = true;
+    } else if (point.x < view.w * 0.46 && point.y > view.h * 0.45) {
+      beginJoystick(event.pointerId, point);
+      handled = true;
+    }
+
+    if (handled) {
+      touch.available = true;
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }
+  }
+
+  function handlePointerMove(event) {
+    if (event.pointerId !== touch.joystickId) return;
+    updateJoystick(pointerPoint(event));
+    event.preventDefault();
+  }
+
+  function handlePointerEnd(event) {
+    if (event.pointerId === touch.joystickId) {
+      touch.joystickId = null;
+      touch.vector = { x: 0, y: 0 };
+      touch.joystickBase = { x: touchControls.joystick.x, y: touchControls.joystick.y };
+      touch.joystickKnob = { ...touch.joystickBase };
+      event.preventDefault();
+    }
+
+    const action = touch.pointerActions.get(event.pointerId);
+    if (action) {
+      setTouchAction(action, false);
+      touch.pointerActions.delete(event.pointerId);
+      event.preventDefault();
+    }
+  }
 
   function makeRng(seed) {
     let t = seed >>> 0;
@@ -390,13 +559,15 @@
       if (keys.has("KeyD") || keys.has("ArrowRight")) dir.x += 1;
       if (keys.has("KeyW") || keys.has("ArrowUp")) dir.y -= 1;
       if (keys.has("KeyS") || keys.has("ArrowDown")) dir.y += 1;
+      dir.x += touch.vector.x;
+      dir.y += touch.vector.y;
       const len = Math.hypot(dir.x, dir.y) || 1;
       return { x: dir.x / len, y: dir.y / len };
     }
 
     humanActions() {
-      if (keys.has("Space")) this.tryDeploy();
-      if (keys.has("ShiftLeft") || keys.has("ShiftRight")) this.tryWall();
+      if (keys.has("Space") || touch.deploy) this.tryDeploy();
+      if (keys.has("ShiftLeft") || keys.has("ShiftRight") || touch.wall) this.tryWall();
     }
 
     botMovement(dt) {
@@ -670,6 +841,7 @@
       for (const node of this.nodes.values()) drawNode(node);
       for (const player of this.players) drawPlayer(player, this.time);
       drawHud(this);
+      if (touchControlsVisible()) drawTouchControls(this);
     }
   }
 
@@ -967,6 +1139,106 @@
     ctx.fillRect(x, y, w, h);
     ctx.fillStyle = color;
     ctx.fillRect(x, y, w * clamp(amount, 0, 1), h);
+  }
+
+  function drawTouchControls(game) {
+    const player = game.players[0];
+    drawJoystick();
+    drawTouchButton(touchControls.wall, touch.wall, 1 - clamp(player.wallCooldown / 1.65, 0, 1));
+    drawTouchButton(touchControls.deploy, touch.deploy, 1 - clamp(player.nodeCooldown / 0.42, 0, 1));
+    drawResetButton();
+  }
+
+  function drawJoystick() {
+    const joy = touchControls.joystick;
+    const base = touch.joystickId == null ? { x: joy.x, y: joy.y } : touch.joystickBase;
+    const knob = touch.joystickId == null ? { x: joy.x, y: joy.y } : touch.joystickKnob;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = "rgba(0, 242, 255, 0.055)";
+    ctx.strokeStyle = "rgba(0, 242, 255, 0.32)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(base.x, base.y, joy.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(221, 235, 255, 0.18)";
+    ctx.lineWidth = 1;
+    drawLine({ x: base.x - joy.r * 0.62, y: base.y }, { x: base.x + joy.r * 0.62, y: base.y }, "rgba(221, 235, 255, 0.18)", 1);
+    drawLine({ x: base.x, y: base.y - joy.r * 0.62 }, { x: base.x, y: base.y + joy.r * 0.62 }, "rgba(221, 235, 255, 0.18)", 1);
+
+    ctx.fillStyle = touch.joystickId == null ? "rgba(0, 242, 255, 0.16)" : "rgba(0, 242, 255, 0.32)";
+    ctx.strokeStyle = touch.joystickId == null ? "rgba(0, 242, 255, 0.42)" : "rgba(0, 242, 255, 0.9)";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(knob.x, knob.y, joy.knobR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawTouchButton(button, active, ready) {
+    const fillAlpha = active ? 0.28 : 0.12;
+    const borderAlpha = ready >= 0.98 ? 0.86 : 0.38;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = rgba(button.color, fillAlpha);
+    ctx.strokeStyle = rgba(button.color, borderAlpha);
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.beginPath();
+    ctx.arc(button.x, button.y, button.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = rgba(button.color, 0.88);
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(button.x, button.y, button.r - 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ready);
+    ctx.stroke();
+
+    ctx.font = "700 11px Segoe UI, sans-serif";
+    ctx.fillStyle = "rgba(221, 235, 255, 0.86)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(button.label, button.x, button.y);
+    ctx.restore();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function drawResetButton() {
+    const reset = touchControls.reset;
+    ctx.save();
+    ctx.fillStyle = touch.reset ? "rgba(255, 20, 147, 0.22)" : "rgba(8, 13, 25, 0.62)";
+    ctx.strokeStyle = "rgba(255, 20, 147, 0.42)";
+    ctx.lineWidth = 1.5;
+    roundRect(reset.x - reset.w * 0.5, reset.y - reset.h * 0.5, reset.w, reset.h, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(221, 235, 255, 0.82)";
+    ctx.font = "700 11px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("RESET", reset.x, reset.y + 1);
+    ctx.restore();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
   }
 
   const game = new Game();
