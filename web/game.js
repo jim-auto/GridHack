@@ -575,7 +575,9 @@
       if (this.botThink <= 0 || Math.hypot(this.target.x - this.pos.x, this.target.y - this.pos.y) < 0.3) {
         this.botThink = this.game.arena.rng.range(0.32, 0.82);
         let target = this.game.arena.randomWalkable();
-        if (this.game.players.length && this.game.arena.rng.next() < 0.62) {
+        if (this.game.uplink && this.game.arena.rng.next() < 0.42) {
+          target = { ...this.game.uplink.cell };
+        } else if (this.game.players.length && this.game.arena.rng.next() < 0.62) {
           const opponent = this.game.players[0];
           const around = {
             x: Math.floor(opponent.pos.x) + this.game.arena.rng.int(-3, 3),
@@ -708,10 +710,13 @@
       this.pulses = [];
       this.events = [];
       this.bursts = [];
+      this.roundWinner = null;
+      this.roundResetTimer = 0;
       this.players = [
         new Player(this, 1, "NULL VECTOR", this.arena.spawns[0], colors.cyan, false),
         new Player(this, 2, "RED GHOST", this.arena.spawns[1], colors.magenta, true)
       ];
+      this.uplink = this.createUplink();
     }
 
     update(dt) {
@@ -721,8 +726,19 @@
         this.reset();
       }
 
+      if (this.roundWinner) {
+        this.roundResetTimer -= dt;
+        if (this.roundResetTimer <= 0) {
+          this.seed += 97;
+          this.reset();
+        }
+        pressed.clear();
+        return;
+      }
+
       this.arena.update(dt);
       for (const player of this.players) player.update(dt);
+      this.updateUplink(dt);
 
       for (const [k, node] of [...this.nodes]) {
         node.update(dt, this);
@@ -752,6 +768,69 @@
       if (this.nodes.has(k)) return false;
       this.nodes.set(k, new InfectionNode(owner, cell));
       return true;
+    }
+
+    createUplink() {
+      const cell = { x: Math.floor(this.arena.width / 2), y: Math.floor(this.arena.height / 2) };
+      this.arena.set(cell, CELL.EMPTY);
+      return {
+        cell,
+        radius: 1.16,
+        progress: [0, 0],
+        holder: 0,
+        contested: false,
+        jamTimer: 0,
+        jamColor: colors.violet,
+        pulse: 0
+      };
+    }
+
+    updateUplink(dt) {
+      this.uplink.pulse += dt;
+      this.uplink.jamTimer = Math.max(0, this.uplink.jamTimer - dt);
+
+      const present = [];
+      const center = { x: this.uplink.cell.x + 0.5, y: this.uplink.cell.y + 0.5 };
+      for (const player of this.players) {
+        if (!player.alive) continue;
+        const distance = Math.hypot(player.pos.x - center.x, player.pos.y - center.y);
+        if (distance <= this.uplink.radius) present.push(player);
+      }
+
+      this.uplink.contested = present.length > 1;
+      this.uplink.holder = present.length === 1 ? present[0].id : 0;
+
+      if (this.uplink.jamTimer > 0 || this.uplink.contested || present.length === 0) {
+        this.uplink.progress[0] = Math.max(0, this.uplink.progress[0] - dt * 2.5);
+        this.uplink.progress[1] = Math.max(0, this.uplink.progress[1] - dt * 2.5);
+        return;
+      }
+
+      const holder = present[0];
+      const ownIndex = holder.id - 1;
+      const enemyIndex = 1 - ownIndex;
+      this.uplink.progress[ownIndex] = Math.min(100, this.uplink.progress[ownIndex] + dt * 13.5);
+      this.uplink.progress[enemyIndex] = Math.max(0, this.uplink.progress[enemyIndex] - dt * 6);
+
+      if (this.uplink.progress[ownIndex] >= 100) {
+        this.roundWinner = holder;
+        this.roundResetTimer = 3.2;
+      }
+    }
+
+    jamUplink(source) {
+      this.uplink.jamTimer = 0.9;
+      this.uplink.jamColor = source ? source.owner.color : colors.violet;
+      this.bursts.push({
+        cell: this.uplink.cell,
+        color: this.uplink.jamColor,
+        age: 0,
+        duration: 0.5
+      });
+    }
+
+    cellTouchesUplink(cell) {
+      return Math.hypot(cell.x - this.uplink.cell.x, cell.y - this.uplink.cell.y) <= 1.05;
     }
 
     tracePropagation(source) {
@@ -815,6 +894,10 @@
     resolveCell(cell, source, intensity) {
       if (this.arena.damageSoft(cell)) return;
 
+      if (this.cellTouchesUplink(cell)) {
+        this.jamUplink(source);
+      }
+
       const node = this.nodes.get(key(cell));
       if (node && node !== source) node.chain(0.08);
 
@@ -850,6 +933,7 @@
     draw() {
       drawBackground(this.time);
       drawArena(this.arena, this.time);
+      drawUplink(this);
       drawPropagationPreviews(this);
       drawPulses(this.pulses);
       drawBursts(this.bursts);
@@ -857,6 +941,7 @@
       for (const player of this.players) drawPlayer(player, this.time);
       drawHud(this);
       if (touchControlsVisible()) drawTouchControls(this);
+      if (this.roundWinner) drawWinnerBanner(this);
     }
   }
 
@@ -1008,6 +1093,57 @@
       ctx.arc(head.x, head.y, 5.5 + 5 * (1 - life), 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  function drawUplink(game) {
+    const uplink = game.uplink;
+    const center = cellCenter(uplink.cell);
+    const radius = view.tile * uplink.radius;
+    const pulse = 0.55 + 0.45 * Math.sin(game.time * 4 + uplink.pulse);
+    const jammed = uplink.jamTimer > 0;
+    const contested = uplink.contested && !jammed;
+    const ringColor = jammed ? uplink.jamColor : contested ? colors.violet : colors.green;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = rgba(ringColor, jammed ? 0.09 : 0.055 + 0.025 * pulse);
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = rgba(ringColor, jammed ? 0.7 : 0.42);
+    ctx.lineWidth = jammed ? 3 : 2;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    drawUplinkProgressArc(center, radius + 7, game.players[0].color, uplink.progress[0], -Math.PI * 0.98);
+    drawUplinkProgressArc(center, radius + 13, game.players[1].color, uplink.progress[1], Math.PI * 0.02);
+
+    const coreSize = view.tile * 0.28;
+    polygon([
+      { x: center.x, y: center.y - coreSize },
+      { x: center.x + coreSize, y: center.y },
+      { x: center.x, y: center.y + coreSize },
+      { x: center.x - coreSize, y: center.y }
+    ], "rgba(3, 6, 13, 0.9)", rgba(ringColor, 0.86), 2);
+
+    ctx.font = "700 10px Segoe UI, sans-serif";
+    ctx.fillStyle = "rgba(221, 235, 255, 0.82)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(jammed ? "JAM" : contested ? "LOCK" : "UPLINK", center.x, center.y);
+    ctx.restore();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function drawUplinkProgressArc(center, radius, color, progress, start) {
+    ctx.strokeStyle = rgba(color, 0.86);
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, start, start + Math.PI * 1.9 * clamp(progress / 100, 0, 1));
+    ctx.stroke();
   }
 
   function drawPropagationPreviews(game) {
@@ -1171,7 +1307,7 @@
     ctx.fillText("GRIDHACK", x + 16, y + (compact ? 25 : 31));
     ctx.font = "12px Segoe UI, sans-serif";
     ctx.fillStyle = colors.white;
-    if (!compact) ctx.fillText("BREACH SECTOR // FFA", x + 16, y + 54);
+    if (!compact) ctx.fillText("BREACH UPLINK // FFA", x + 16, y + 54);
 
     if (compact) {
       const rowW = Math.max(126, (w - 42) * 0.5);
@@ -1190,6 +1326,20 @@
     ctx.textAlign = "right";
     ctx.fillText(`SEED ${game.seed}`, x + w - 18, y + (compact ? 24 : 43));
     ctx.textAlign = "left";
+
+    if (!compact) {
+      drawObjectiveMiniHud(game, x + w - 260, y + 52, 156);
+    }
+  }
+
+  function drawObjectiveMiniHud(game, x, y, width) {
+    const p1 = game.uplink.progress[0] / 100;
+    const p2 = game.uplink.progress[1] / 100;
+    ctx.font = "700 10px Segoe UI, sans-serif";
+    ctx.fillStyle = "rgba(221, 235, 255, 0.7)";
+    ctx.fillText(game.uplink.jamTimer > 0 ? "UPLINK JAMMED" : "UPLINK CONTROL", x, y - 10);
+    bar(x, y, width, 4, p1, game.players[0].color);
+    bar(x, y + 7, width, 4, p2, game.players[1].color);
   }
 
   function drawPlayerHud(player, x, y, width, compact) {
@@ -1301,6 +1451,34 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("RESET", reset.x, reset.y + 1);
+    ctx.restore();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  function drawWinnerBanner(game) {
+    const winner = game.roundWinner;
+    const w = Math.min(520, view.w - 40);
+    const h = 92;
+    const x = (view.w - w) * 0.5;
+    const y = (view.h - h) * 0.5;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(3, 6, 13, 0.86)";
+    ctx.strokeStyle = rgba(winner.color, 0.74);
+    ctx.lineWidth = 2;
+    roundRect(x, y, w, h, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = winner.color;
+    ctx.font = "700 24px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${winner.name} BREACHED`, x + w * 0.5, y + 34);
+    ctx.fillStyle = "rgba(221, 235, 255, 0.78)";
+    ctx.font = "12px Segoe UI, sans-serif";
+    ctx.fillText("NEXT SECTOR LOADING", x + w * 0.5, y + 64);
     ctx.restore();
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
