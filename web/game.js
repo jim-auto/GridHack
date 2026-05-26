@@ -754,11 +754,16 @@
       return true;
     }
 
-    propagate(source) {
+    tracePropagation(source) {
       const frontier = [{ ...source.cell }];
       const came = new Map();
       const depth = new Map();
-      const order = [{ ...source.cell }];
+      const order = [{
+        cell: { ...source.cell },
+        parent: { ...source.cell },
+        depth: 0,
+        blocked: false
+      }];
       came.set(key(source.cell), { ...source.cell });
       depth.set(key(source.cell), 0);
 
@@ -771,17 +776,26 @@
           if (came.has(nk)) continue;
           came.set(nk, current);
           depth.set(nk, currentDepth + 1);
-          order.push(next);
-          if (this.arena.get(next) !== CELL.SOFT) frontier.push(next);
+          order.push({
+            cell: { ...next },
+            parent: { ...current },
+            depth: currentDepth + 1,
+            blocked: this.arena.get(next) === CELL.SOFT
+          });
+          if (this.arena.get(next) !== CELL.SOFT) frontier.push({ ...next });
         }
       }
+      return order;
+    }
 
-      for (const cell of order) {
-        const d = depth.get(key(cell));
-        const parent = came.get(key(cell));
+    propagate(source) {
+      const trace = this.tracePropagation(source);
+      for (const route of trace) {
+        const cell = route.cell;
+        const d = route.depth;
         if (key(cell) !== key(source.cell)) {
           this.pulses.push({
-            from: parent,
+            from: route.parent,
             to: cell,
             color: source.owner.color,
             age: 0,
@@ -836,6 +850,7 @@
     draw() {
       drawBackground(this.time);
       drawArena(this.arena, this.time);
+      drawPropagationPreviews(this);
       drawPulses(this.pulses);
       drawBursts(this.bursts);
       for (const node of this.nodes.values()) drawNode(node);
@@ -992,6 +1007,70 @@
       ctx.beginPath();
       ctx.arc(head.x, head.y, 5.5 + 5 * (1 - life), 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+
+  function drawPropagationPreviews(game) {
+    for (const node of game.nodes.values()) {
+      if (node.done) continue;
+      const trace = game.tracePropagation(node);
+      const charge = clamp(node.elapsed / node.arm, 0, 1);
+      const baseAlpha = node.chainWarning ? 0.3 : 0.08 + charge * 0.12;
+      const color = node.owner.color;
+
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (const route of trace) {
+        if (route.depth === 0) continue;
+        const from = cellCenter(route.parent);
+        const to = cellCenter(route.cell);
+        const depthFade = clamp(1 - route.depth / (node.radius + 1), 0.22, 0.82);
+        const alpha = baseAlpha * depthFade;
+        dashed(from, to, rgba(color, alpha), route.blocked ? 1.4 : 2, route.blocked ? 6 : 8);
+      }
+
+      for (const route of trace) {
+        const center = cellCenter(route.cell);
+        const depthFade = clamp(1 - route.depth / (node.radius + 1), 0.18, 0.72);
+        const alpha = baseAlpha * depthFade;
+        drawPreviewCellMarker(center, color, alpha, route.blocked, route.depth === 0);
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawPreviewCellMarker(center, color, alpha, blocked, origin) {
+    const size = origin ? view.tile * 0.26 : view.tile * 0.18;
+    const gap = size * 0.42;
+    const line = Math.max(1, view.tile * 0.035);
+    const markerAlpha = origin ? alpha * 1.25 : alpha;
+    const stroke = blocked ? rgba(colors.magenta, markerAlpha * 1.15) : rgba(color, markerAlpha);
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = blocked ? line * 0.8 : line;
+
+    const corners = [
+      { sx: -1, sy: -1 },
+      { sx: 1, sy: -1 },
+      { sx: 1, sy: 1 },
+      { sx: -1, sy: 1 }
+    ];
+    for (const corner of corners) {
+      const x = center.x + corner.sx * size;
+      const y = center.y + corner.sy * size;
+      ctx.beginPath();
+      ctx.moveTo(x, y + corner.sy * gap);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x + corner.sx * gap, y);
+      ctx.stroke();
+    }
+
+    if (blocked) {
+      drawLine(
+        { x: center.x - size * 0.7, y: center.y - size * 0.7 },
+        { x: center.x + size * 0.7, y: center.y + size * 0.7 },
+        rgba(colors.magenta, markerAlpha * 0.9),
+        1
+      );
     }
   }
 
