@@ -35,6 +35,7 @@
     green: "#39ff88",
     white: "#ddebff"
   };
+  const audio = createAudioSystem();
 
   let view = {
     w: 1280,
@@ -70,6 +71,7 @@
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(event.code)) {
       event.preventDefault();
     }
+    audio.unlock();
     if (!keys.has(event.code)) {
       pressed.add(event.code);
     }
@@ -184,6 +186,7 @@
   function handlePointerDown(event) {
     if (!touchControlsVisible()) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    audio.unlock();
     const point = pointerPoint(event);
     let handled = false;
 
@@ -279,6 +282,122 @@
   function rgba(hex, alpha) {
     const rgb = hexToRgb(hex);
     return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+  }
+
+  function createAudioSystem() {
+    let context = null;
+    let master = null;
+    let lastUplinkTick = 0;
+    let unlocked = false;
+
+    function ensure() {
+      if (context) return true;
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) return false;
+      context = new AudioCtor();
+      master = context.createGain();
+      master.gain.value = 0.22;
+      master.connect(context.destination);
+      return true;
+    }
+
+    function unlock() {
+      if (!ensure()) return;
+      if (context.state === "suspended") context.resume();
+      if (!unlocked) {
+        unlocked = true;
+        blip(220, 0.03, 0.015, "sine", 0.25);
+      }
+    }
+
+    function tone(frequency, duration, gain, type = "sine", slide = 0) {
+      if (!ensure() || !unlocked) return;
+      const now = context.currentTime;
+      const osc = context.createOscillator();
+      const amp = context.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(frequency, now);
+      if (slide !== 0) {
+        osc.frequency.exponentialRampToValueAtTime(Math.max(32, frequency + slide), now + duration);
+      }
+      amp.gain.setValueAtTime(0.0001, now);
+      amp.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), now + 0.012);
+      amp.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      osc.connect(amp);
+      amp.connect(master);
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+    }
+
+    function noise(duration, gain, filterFrequency) {
+      if (!ensure() || !unlocked) return;
+      const now = context.currentTime;
+      const bufferSize = Math.max(1, Math.floor(context.sampleRate * duration));
+      const buffer = context.createBuffer(1, bufferSize, context.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i += 1) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+      }
+      const source = context.createBufferSource();
+      const filter = context.createBiquadFilter();
+      const amp = context.createGain();
+      source.buffer = buffer;
+      filter.type = "bandpass";
+      filter.frequency.value = filterFrequency;
+      filter.Q.value = 8;
+      amp.gain.setValueAtTime(gain, now);
+      amp.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      source.connect(filter);
+      filter.connect(amp);
+      amp.connect(master);
+      source.start(now);
+      source.stop(now + duration);
+    }
+
+    function blip(frequency, duration, gain, type = "square", slide = 0) {
+      tone(frequency, duration, gain, type, slide);
+    }
+
+    return {
+      unlock,
+      deploy(player) {
+        const base = player.id === 1 ? 540 : 430;
+        blip(base, 0.09, 0.04, "square", 90);
+        blip(base * 1.5, 0.07, 0.022, "triangle", -60);
+      },
+      wall(player) {
+        const base = player.id === 1 ? 260 : 220;
+        blip(base, 0.12, 0.035, "sawtooth", -80);
+        noise(0.06, 0.018, 1200);
+      },
+      propagate(player, depth = 0) {
+        const base = player.id === 1 ? 720 : 610;
+        blip(base + depth * 18, 0.045, 0.018, "square", -90);
+      },
+      hit(player) {
+        const base = player.id === 1 ? 180 : 150;
+        blip(base, 0.14, 0.055, "sawtooth", -70);
+        noise(0.08, 0.035, 650);
+      },
+      jam(colorOwnerId) {
+        const base = colorOwnerId === 1 ? 360 : 320;
+        blip(base, 0.16, 0.052, "triangle", -120);
+        noise(0.13, 0.026, 980);
+      },
+      uplink(progress, holderId, time) {
+        if (!holderId || progress <= 0) return;
+        if (time - lastUplinkTick < 0.52) return;
+        lastUplinkTick = time;
+        const base = holderId === 1 ? 880 : 760;
+        blip(base + progress * 1.8, 0.04, 0.016, "sine", 30);
+      },
+      win(player) {
+        const base = player.id === 1 ? 520 : 460;
+        blip(base, 0.11, 0.05, "square", 180);
+        setTimeout(() => blip(base * 1.25, 0.12, 0.05, "triangle", 240), 90);
+        setTimeout(() => blip(base * 1.62, 0.18, 0.055, "sine", -80), 190);
+      }
+    };
   }
 
   function cellCenter(cell) {
@@ -635,6 +754,7 @@
       if (this.game.deployNode(this, cell)) {
         this.activeNodes += 1;
         this.nodeCooldown = 0.42;
+        audio.deploy(this);
       }
     }
 
@@ -647,6 +767,7 @@
       if (this.game.arena.canTempWall(target)) {
         this.game.arena.setTempWall(target, this, 2.4);
         this.wallCooldown = 1.65;
+        audio.wall(this);
       }
     }
 
@@ -815,12 +936,17 @@
       if (this.uplink.progress[ownIndex] >= 100) {
         this.roundWinner = holder;
         this.roundResetTimer = 3.2;
+        audio.win(holder);
+      } else {
+        audio.uplink(this.uplink.progress[ownIndex], holder.id, this.time);
       }
     }
 
     jamUplink(source) {
+      const wasJammed = this.uplink.jamTimer > 0;
       this.uplink.jamTimer = 0.9;
       this.uplink.jamColor = source ? source.owner.color : colors.violet;
+      if (!wasJammed) audio.jam(source ? source.owner.id : 0);
       this.bursts.push({
         cell: this.uplink.cell,
         color: this.uplink.jamColor,
@@ -880,6 +1006,7 @@
             age: 0,
             duration: 0.15 + d * 0.012
           });
+          if (route.depth <= 2 && route.depth > 0) audio.propagate(source.owner, route.depth);
         }
         this.events.push({
           at: this.time + d * 0.07,
@@ -903,7 +1030,9 @@
 
       for (const player of this.players) {
         if (player.alive && Math.floor(player.pos.x) === cell.x && Math.floor(player.pos.y) === cell.y) {
+          const before = player.integrity;
           player.corrupt(38 * intensity);
+          if (before > player.integrity) audio.hit(player);
         }
       }
 
